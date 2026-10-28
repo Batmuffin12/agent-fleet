@@ -1,0 +1,6 @@
+{
+  "name": "agent-fleet",
+  "version": "0.2.0",
+  "description": "A side pane showing every Claude session on this machine by repo and branch: what each agent is doing, branch health and predicted conflicts, a recap of what happened while you were away, and buttons to message any agent",
+  "types": "./types/index.d.ts"
+}

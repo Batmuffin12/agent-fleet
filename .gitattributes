@@ -1,0 +1,2 @@
+# Keep LF everywhere: demo/setup.sh breaks in bash with CRLF line endings.
+* text=auto eol=lf

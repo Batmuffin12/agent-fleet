@@ -1,0 +1,10 @@
+# Built by demo/setup.sh
+demo/repo/
+demo/worktrees/
+
+# Written by Claude Code when it loads the mod
+.claude-plugin/types/
+
+node_modules/
+*.log
+.DS_Store

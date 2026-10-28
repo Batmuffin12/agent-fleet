@@ -1,0 +1,105 @@
+export type AgentStatusWord = 'working' | 'waiting' | 'idle' | 'done' | 'offline'
+
+/** One agent (a session, or one of its subagents) as the pane shows it. */
+export type FleetAgent = {
+  id: string
+  name: string
+  status: AgentStatusWord
+  activity: string
+  /** Where the agent works: a session's cwd, a subagent's last touched path. */
+  path: string
+  /** When the status or activity last changed. */
+  updatedAt: number
+}
+
+/** Another branch this one cannot merge with cleanly, and the files that clash. */
+export type FleetConflict = {
+  branch: string
+  files: string[]
+}
+
+export type FleetWorktree = {
+  path: string
+  branch: string
+  /** The full commit id; the pane shows its first 7 characters. */
+  head: string
+  dirty: number
+  dirtyFiles: string[]
+  lastCommit: string
+  /** The main worktree's branch, which `ahead` and `behind` count against. */
+  base: string
+  ahead: number
+  behind: number
+  conflicts: FleetConflict[]
+}
+
+/** Something worth telling the person about later: the recap and the pings. */
+export type FleetEvent = {
+  /** Stable across sessions, so the union shows each event once. */
+  id: string
+  kind: 'commit' | 'done' | 'needs' | 'stuck'
+  text: string
+  at: number
+}
+
+/**
+ * What one session writes to ~/.claude/agent-fleet/v3/<session>.json. Every
+ * session on the machine reads every file, so each pane draws the union.
+ */
+export type FleetBeat = {
+  v: 3
+  sessionId: string
+  cwd: string
+  /** The main working tree of the session's repo; '' outside a repo. */
+  repoRoot: string
+  /** Set with `/fleet name`; else the pane names the session by `title`. */
+  name: string
+  /** The session's first prompt, shortened: what it was started for. */
+  title: string
+  /** A real session, which may send the machine's notifications. */
+  notifier: boolean
+  /** This session's last `git worktree list` of its repo, shared with the others. */
+  worktrees: FleetWorktree[]
+  worktreesAt: number
+  status: AgentStatusWord
+  activity: string
+  prompt: string
+  subagents: FleetAgent[]
+  events: FleetEvent[]
+  /** When the status or activity last changed. */
+  updatedAt: number
+  /** The last heartbeat: a session that stops writing goes offline. */
+  aliveAt: number
+  ended?: boolean
+}
+
+export type FleetView = {
+  beats: FleetBeat[]
+  checkedAt: number
+}
+
+/** This session's own pane settings and what its buttons last did. */
+export type FleetUi = {
+  compact: boolean
+  /** Worktree paths whose cards are folded. */
+  collapsed: string[]
+  /** The selected agent's row key, whose actions show under it. */
+  selected: string
+  composing: boolean
+  /** The recap shows events after this. */
+  dismissedAt: number
+  /** Events already sent as notifications. */
+  notified: string[]
+  notifiedAt: number
+  lastAction: { text: string; ok: boolean; at: number } | null
+}
+
+declare module 'claude-code' {
+  interface PluginState {
+    'agent-fleet': {
+      view: Shaped<FleetView>
+      self: Shaped<FleetBeat>
+      ui: Shaped<FleetUi>
+    }
+  }
+}
