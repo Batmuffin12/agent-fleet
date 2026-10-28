@@ -1,5 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
+import { NOW, VIEW } from './fixtures'
+
 const PANE = {
   plugin: 'agent-fleet',
   component: 'Pane',
@@ -7,88 +9,12 @@ const PANE = {
   props: {
     title: 'Agent fleet',
     isFocused: false,
-    bodyColumns: 60,
+    bodyColumns: 64,
     placement: 'dock',
     scroll: { offset: 0, bodyRows: 80 },
     view: {},
   },
 } as const
-
-const tree = (over: Record<string, unknown>) => ({
-  head: 'abc1234abc1234',
-  dirty: 0,
-  dirtyFiles: [],
-  lastCommit: 'init',
-  base: 'main',
-  ahead: 0,
-  behind: 0,
-  conflicts: [],
-  ...over,
-})
-
-const beat = (over: Record<string, unknown>) => ({
-  v: 3,
-  name: '',
-  title: '',
-  notifier: true,
-  worktrees: [],
-  worktreesAt: 0,
-  subagents: [],
-  events: [],
-  prompt: '',
-  updatedAt: 98_000,
-  aliveAt: 99_000,
-  ...over,
-})
-
-const VIEW = {
-  checkedAt: 100_000,
-  beats: [
-    // Another session, in a worktree of app, sharing app's worktrees and their health.
-    beat({
-      sessionId: 'other-session',
-      title: 'oauth login',
-      cwd: 'C:\\code\\app-wt\\auth\\src',
-      repoRoot: 'C:/code/app',
-      worktrees: [
-        tree({ path: 'C:/code/app', branch: 'main' }),
-        tree({
-          path: 'C:/code/app-wt/auth',
-          branch: 'feat/auth',
-          dirty: 1,
-          dirtyFiles: ['src/config.ts'],
-          ahead: 2,
-          behind: 1,
-          conflicts: [{ branch: 'fix/billing', files: ['README.md'] }],
-        }),
-        tree({
-          path: 'C:/code/app-wt/billing',
-          branch: 'fix/billing',
-          dirty: 1,
-          dirtyFiles: ['src/config.ts'],
-          conflicts: [{ branch: 'feat/auth', files: ['README.md'] }],
-        }),
-      ],
-      worktreesAt: 99_000,
-      status: 'working',
-      activity: 'Edit login.ts',
-      prompt: 'add oauth login',
-      events: [{ id: 'commit:auth:1', kind: 'commit', text: 'feat/auth: 2 new commits', at: 97_000 }],
-      inbox: { text: 'stop after login.ts', at: 95_000 },
-      reply: { text: 'Stopping after login.ts, then committing.', at: 96_000 },
-    }),
-    // A session in a second repo, stopped on a permission prompt.
-    beat({
-      sessionId: 'blocked-session',
-      cwd: 'C:/code/site',
-      repoRoot: 'C:/code/site',
-      worktrees: [tree({ path: 'C:/code/site', branch: 'main' })],
-      worktreesAt: 99_000,
-      status: 'waiting',
-      activity: 'ask: Bash npm publish',
-    }),
-  ],
-}
 
 type On = Parameters<Extract<Parameters<typeof test>[1], (...a: never[]) => unknown>>[1]
 
@@ -96,50 +22,60 @@ type On = Parameters<Extract<Parameters<typeof test>[1], (...a: never[]) => unkn
 const seed = (on: On) => {
   on('state.get', (_, e, next) =>
     (e as unknown as { key: string }).key === 'view'
-      ? { value: { value: { shape: 'view-3', value: VIEW }, version: 1 } }
+      ? { value: { value: { shape: 'view-4', value: VIEW }, version: 1 } }
       : next(e),
   )
-  on('clock.now', () => ({ value: VIEW.checkedAt }))
+  on('clock.now', () => ({ value: NOW }))
   on('ui.toast', () => ({ value: undefined }))
 }
 
-test('the union of every session: by repo, then worktree, with health and a recap', async ($, on) => {
+test('the pane: a summary line, the git map with health, and the feed', async ($, on) => {
   seed(on)
 
   for (const surface of ['terminal', 'desktop', 'mobile'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
+    expect(await ui.find({ type: 'Text', text: /! 1 needs you/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /⚠ 1 conflict/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /feat\/auth/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /Editing login\.ts/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /add oauth login/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /Needs you \(1\)/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /↑2 ↓1/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /oauth login/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /editing login\.ts/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /2 new commits/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /Wants your OK: Running "npm publish"/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /↑2 ahead · ↓1 behind main/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /Will conflict with fix\/billing in README\.md/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /also has unsaved changes to src\/config\.ts/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /While you were away/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /feat\/auth: 2 new commits/ })).toBeDefined()
-    // Each agent shows what to type to reach it, and the last exchange with it.
-    expect(await ui.find({ type: 'Text', text: /@oauth-login/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /→ you: stop after login\.ts/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /↩ Stopping after login\.ts, then committing\./ })).toBeDefined()
     await ui.unmount()
   }
 })
 
-test('pressing a name shows Message and Stop; Stop says what happened', async ($, on) => {
+test('a branch opens its warnings; an agent opens its details, exchange and buttons', async ($, on) => {
   seed(on)
   on('session.send', () => ({ isDelivered: true }))
 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'br:c:/code/app-wt/auth' })
+  expect(await ui.find({ type: 'Text', text: /will conflict with fix\/billing in README\.md/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /fix\/billing also changed src\/config\.ts/ })).toBeDefined()
+
   await ui.press({ key: 'sel:other-session' })
-  expect(await ui.find({ type: 'Button', key: 'act:msg' })).toBeDefined()
-  expect(await ui.find({ type: 'Button', key: 'act:stop' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Task: .*add oauth login/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /→ you: stop after login\.ts/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /↩ Stopping after login\.ts, then committing\./ })).toBeDefined()
 
   await ui.press({ key: 'act:stop' })
-  expect(await ui.find({ type: 'Text', text: /Sent to oauth login: "Please stop after/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /✓ Sent to oauth login: "Please stop after/ })).toBeDefined()
 
-  await ui.press({ key: 'act:close' })
+  await ui.press({ key: 'sel:other-session' })
   expect(await ui.find({ type: 'Button', key: 'act:stop' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('compact shows the map alone; a repo folds', async ($, on) => {
+  seed(on)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'compact' })
+  expect(await ui.find({ type: 'Text', text: /2 new commits/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /feat\/auth/ })).toBeDefined()
+  await ui.press({ key: 'fold:c:/code/app' })
+  expect(await ui.find({ type: 'Text', text: /feat\/auth/ })).toBeUndefined()
   await ui.unmount()
 })
 
@@ -158,10 +94,9 @@ test('"@handle message" in the prompt goes to that agent, not to this model', as
   expect(sent).toHaveLength(1)
   expect(sent[0]).toMatchObject({
     to: 'other-session',
-    text: expect.stringMatching(/^\(from the user, via agent-fleet\) stop after login\.ts$/),
+    text: '(from the user, via agent-fleet) stop after login.ts',
   })
 
-  // An @file mention, or any other prompt, reaches the model as typed.
   const passed = await $.prompt.submit({ text: '@src/app.ts explain this' } as never)
   expect(passed).not.toHaveProperty('drop')
   expect(sent).toHaveLength(1)
@@ -169,14 +104,27 @@ test('"@handle message" in the prompt goes to that agent, not to this model', as
 
 test('on the phone, /fleet answers in the chat with the fleet itself', async ($, on) => {
   seed(on)
-
   const ui = await $.ui.mount({
     plugin: 'agent-fleet',
     surface: 'mobile',
     component: 'CommandOutput',
     props: { command: 'fleet', args: '', text: 'text summary', isErrored: false },
   })
-  expect(await ui.find({ type: 'Text', text: /Needs you \(1\)/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /! 1 needs you/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /feat\/auth/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('the band above the prompt names who needs the person', async ($, on) => {
+  seed(on)
+  on('ui.panes', () => ({ value: [] }))
+  const ui = await $.ui.mount({
+    plugin: 'agent-fleet',
+    surface: 'terminal',
+    component: 'AbovePrompt',
+    props: { hasSurvey: false, isWorking: false, maxRows: 4, bodyColumns: 100, scroll: { offset: 0, bodyRows: 4 } },
+  } as never)
+  expect(await ui.find({ type: 'Text', text: /! site deploy/ })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'band:reply' })).toBeDefined()
   await ui.unmount()
 })
