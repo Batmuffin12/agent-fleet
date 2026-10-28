@@ -1,6 +1,12 @@
 export type AgentStatusWord = 'working' | 'waiting' | 'idle' | 'done' | 'offline'
 
-/** One agent (a session, or one of its subagents) as the pane shows it. */
+/** One moment of activity, for the activity bars: what kind of work it was. */
+export type Sample = {
+  at: number
+  kind: 'edit' | 'run' | 'wait'
+}
+
+/** One agent (a session, or one of its subagents). */
 export type FleetAgent = {
   id: string
   name: string
@@ -10,6 +16,8 @@ export type FleetAgent = {
   path: string
   /** When the status or activity last changed. */
   updatedAt: number
+  /** The last half hour of activity, oldest first. */
+  trail: Sample[]
 }
 
 /** Another branch this one cannot merge with cleanly, and the files that clash. */
@@ -21,7 +29,7 @@ export type FleetConflict = {
 export type FleetWorktree = {
   path: string
   branch: string
-  /** The full commit id; the pane shows its first 7 characters. */
+  /** The full commit id. */
   head: string
   dirty: number
   dirtyFiles: string[]
@@ -33,21 +41,23 @@ export type FleetWorktree = {
   conflicts: FleetConflict[]
 }
 
-/** Something worth telling the person about later: the recap and the pings. */
+/** One line of the feed. */
 export type FleetEvent = {
   /** Stable across sessions, so the union shows each event once. */
   id: string
-  kind: 'commit' | 'done' | 'needs' | 'stuck'
+  kind: 'commit' | 'done' | 'needs' | 'stuck' | 'message' | 'reply'
+  /** Who it is about: an agent's name, or a branch for a commit. */
+  who: string
   text: string
   at: number
 }
 
 /**
- * What one session writes to ~/.claude/agent-fleet/v3/<session>.json. Every
+ * What one session writes to ~/.claude/agent-fleet/v4/<session>.json. Every
  * session on the machine reads every file, so each pane draws the union.
  */
 export type FleetBeat = {
-  v: 3
+  v: 4
   sessionId: string
   cwd: string
   /** The main working tree of the session's repo; '' outside a repo. */
@@ -64,6 +74,7 @@ export type FleetBeat = {
   status: AgentStatusWord
   activity: string
   prompt: string
+  trail: Sample[]
   subagents: FleetAgent[]
   events: FleetEvent[]
   /** When the status or activity last changed. */
@@ -71,7 +82,7 @@ export type FleetBeat = {
   /** The last heartbeat: a session that stops writing goes offline. */
   aliveAt: number
   ended?: boolean
-  /** The person's last message to this session from another session's pane. */
+  /** The person's last message to this session from another session. */
   inbox?: { text: string; at: number } | null
   /** This session's answer to it: its first reply after the message. */
   reply?: { text: string; at: number } | null
@@ -84,13 +95,14 @@ export type FleetView = {
 
 /** This session's own pane settings and what its buttons last did. */
 export type FleetUi = {
+  /** The map alone, no feed. */
   compact: boolean
-  /** Worktree paths whose cards are folded. */
-  collapsed: string[]
-  /** The selected agent's row key, whose actions show under it. */
+  /** Repo roots whose branches are folded. */
+  folded: string[]
+  /** A row key (an agent), or `branch:<worktree path>`: its details show under it. */
   selected: string
-  /** The recap shows events after this. */
-  dismissedAt: number
+  /** The feed marks what came after this as new. */
+  seenAt: number
   /** Events already sent as notifications. */
   notified: string[]
   notifiedAt: number
