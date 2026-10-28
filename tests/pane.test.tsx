@@ -74,6 +74,8 @@ const VIEW = {
       activity: 'Edit login.ts',
       prompt: 'add oauth login',
       events: [{ id: 'commit:auth:1', kind: 'commit', text: 'feat/auth: 2 new commits', at: 97_000 }],
+      inbox: { text: 'stop after login.ts', at: 95_000 },
+      reply: { text: 'Stopping after login.ts, then committing.', at: 96_000 },
     }),
     // A session in a second repo, stopped on a permission prompt.
     beat({
@@ -116,24 +118,53 @@ test('the union of every session: by repo, then worktree, with health and a reca
     expect(await ui.find({ type: 'Text', text: /also has unsaved changes to src\/config\.ts/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /While you were away/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /feat\/auth: 2 new commits/ })).toBeDefined()
+    // Each agent shows what to type to reach it, and the last exchange with it.
+    expect(await ui.find({ type: 'Text', text: /@oauth-login/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /→ you: stop after login\.ts/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /↩ Stopping after login\.ts, then committing\./ })).toBeDefined()
     await ui.unmount()
   }
 })
 
-test('pressing a name shows its buttons; a preset answers with what happened', async ($, on) => {
+test('pressing a name shows Message and Stop; Stop says what happened', async ($, on) => {
   seed(on)
+  on('session.send', () => ({ isDelivered: true }))
 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   await ui.press({ key: 'sel:other-session' })
-  expect(await ui.find({ type: 'Button', key: 'act:u' })).toBeDefined()
   expect(await ui.find({ type: 'Button', key: 'act:msg' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'act:stop' })).toBeDefined()
 
-  await ui.press({ key: 'act:u' })
-  expect(await ui.find({ type: 'Text', text: /Sent "Status\?" to oauth login|Couldn't reach oauth login/ })).toBeDefined()
+  await ui.press({ key: 'act:stop' })
+  expect(await ui.find({ type: 'Text', text: /Sent to oauth login: "Please stop after/ })).toBeDefined()
 
   await ui.press({ key: 'act:close' })
-  expect(await ui.find({ type: 'Button', key: 'act:u' })).toBeUndefined()
+  expect(await ui.find({ type: 'Button', key: 'act:stop' })).toBeUndefined()
   await ui.unmount()
+})
+
+test('"@handle message" in the prompt goes to that agent, not to this model', async ($, on) => {
+  seed(on)
+  const sent: unknown[] = []
+  on('session.send', (_, e) => {
+    sent.push(e)
+    return { isDelivered: true }
+  })
+  // The engine beneath: a prompt that reaches it enters as typed.
+  on('prompt.submit', (_, e) => ({ text: e.text }))
+
+  const routed = await $.prompt.submit({ text: '@oauth-login stop after login.ts' } as never)
+  expect(routed).toMatchObject({ drop: expect.stringMatching(/Sent to oauth login/) })
+  expect(sent).toHaveLength(1)
+  expect(sent[0]).toMatchObject({
+    to: 'other-session',
+    text: expect.stringMatching(/^\(from the user, via agent-fleet\) stop after login\.ts$/),
+  })
+
+  // An @file mention, or any other prompt, reaches the model as typed.
+  const passed = await $.prompt.submit({ text: '@src/app.ts explain this' } as never)
+  expect(passed).not.toHaveProperty('drop')
+  expect(sent).toHaveLength(1)
 })
 
 test('on the phone, /fleet answers in the chat with the fleet itself', async ($, on) => {

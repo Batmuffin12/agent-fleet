@@ -71,6 +71,10 @@ export type FleetBeat = {
   /** The last heartbeat: a session that stops writing goes offline. */
   aliveAt: number
   ended?: boolean
+  /** The person's last message to this session from another session's pane. */
+  inbox?: { text: string; at: number } | null
+  /** This session's answer to it: its first reply after the message. */
+  reply?: { text: string; at: number } | null
 }
 
 export type FleetView = {
@@ -85,7 +89,6 @@ export type FleetUi = {
   collapsed: string[]
   /** The selected agent's row key, whose actions show under it. */
   selected: string
-  composing: boolean
   /** The recap shows events after this. */
   dismissedAt: number
   /** Events already sent as notifications. */

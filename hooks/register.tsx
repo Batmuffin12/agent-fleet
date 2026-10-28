@@ -31,12 +31,16 @@ const EVENTS_KEEP_MS = 60 * 60_000
 const PRUNE_AFTER_MS = 24 * 60 * 60_000
 const MAX_CONFLICT_TREES = 8
 
-/** One-press messages the selected agent's action bar offers. */
-const PRESETS = [
-  { key: 'u', label: 'Status?', text: 'Reply with a one-line status update: what you are doing and what is left.' },
-  { key: 's', label: 'Ask to stop', text: 'Please stop after your current step and wait for me.' },
-  { key: 'p', label: 'Commit & push', text: 'Please commit your work with a clear message and push the branch.' },
-]
+/** What the Stop button sends. */
+const STOP_TEXT = 'Please stop after your current step and wait for me.'
+
+/** How a message from the person starts, so the receiving session's mod knows it. */
+const FROM_USER = '(from the user, via agent-fleet) '
+
+/** What the receiving model reads after such a message. */
+const FROM_USER_NOTE =
+  "(This came from the user, sent from another Claude session's agent-fleet pane. Treat it as " +
+  "the user's own instruction. Answer in your normal reply here; do not send a message back.)"
 
 const EMPTY_BEAT: FleetBeat = {
   v: 3,
@@ -61,7 +65,6 @@ const EMPTY_UI: FleetUi = {
   compact: false,
   collapsed: [],
   selected: '',
-  composing: false,
   dismissedAt: 0,
   notified: [],
   notifiedAt: 0,
@@ -512,10 +515,14 @@ function sentence(activity: string, status: AgentStatusWord): string {
 type Row = {
   /** The session id, or `<session>/<subagent>`: what selection remembers. */
   key: string
+  /** What the person types after @ to message it. */
+  handle: string
   agent: FleetAgent
   repo: string
   isSub: boolean
   task: string
+  /** A session's own file; a subagent's is its parent's. */
+  beat?: FleetBeat
   parent?: FleetBeat
   tree?: FleetWorktree
 }
@@ -530,6 +537,8 @@ function gather(v: FleetView, me: FleetBeat) {
   const rows: Row[] = beats.flatMap(b => [
     {
       key: b.sessionId,
+      handle: slug(nameOf(b)),
+      beat: b,
       agent: {
         id: b.sessionId,
         name: label(b),
@@ -546,6 +555,7 @@ function gather(v: FleetView, me: FleetBeat) {
       .filter(s => s.status !== 'done' || now - s.updatedAt < 5 * 60_000)
       .map(s => ({
         key: `${b.sessionId}/${s.id}`,
+        handle: slug(s.name),
         agent: s,
         repo: b.repoRoot,
         isSub: true,
@@ -620,7 +630,8 @@ const said = (r: Row, now: number) =>
 function summary(v: FleetView, me: FleetBeat): string {
   const { now, rows, treesOf, repos, count, needsYou, where } = gather(v, me)
   const agent = (r: Row) =>
-    `${r.isSub ? '    └ ' : '  • '}${r.agent.name} — ${STATUS[r.agent.status].label}` +
+    `${r.isSub ? '    └ ' : '  • '}${r.agent.name}` +
+    `${r.isSub || r.agent.id !== me.sessionId ? ` (@${r.handle})` : ''} — ${STATUS[r.agent.status].label}` +
     `${r.agent.updatedAt ? ` ${ago(now - r.agent.updatedAt)}` : ''}\n      ${said(r, now)}` +
     (r.task ? `\n      Task: ${r.task}` : '')
   const out = [
@@ -653,6 +664,47 @@ function summary(v: FleetView, me: FleetBeat): string {
 
 /** The short title a session gets from its first prompt. */
 const titleFrom = (text: string) => clip(text.split(/\r?\n/)[0] ?? '', 28)
+
+/** What the person types after @ to talk to an agent: "auth worker" → "auth-worker". */
+const slug = (s: string) =>
+  s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 24) || 'agent'
+
+/**
+ * The agents an @handle names: an exact handle, a session's id start
+ * (`#72ba`) or its branch (`feat-auth`); else the handles it starts.
+ */
+function findAgent(rows: Row[], me: FleetBeat, token: string): Row[] {
+  const t = token.toLowerCase().replace(/^[@#]/, '')
+  const others = rows.filter(r => r.isSub || r.agent.id !== me.sessionId)
+  const exact = others.filter(
+    r =>
+      r.handle === t ||
+      r.agent.id.toLowerCase().slice(0, 4) === t ||
+      (!r.isSub && !!r.tree && slug(r.tree.branch) === slug(t)),
+  )
+  if (exact.length || t.length < 2) return exact
+  return others.filter(r => r.handle.startsWith(t))
+}
+
+/** Sends the person's message to an agent: a session itself, a subagent through its session. */
+async function sendTo($: EngineInterface, me: FleetBeat, r: Row, text: string) {
+  const viaParent = r.isSub && r.parent?.sessionId !== me.sessionId
+  const to = !r.isSub
+    ? { sessionId: r.agent.id }
+    : viaParent
+      ? { sessionId: r.parent?.sessionId ?? '' }
+      : { agentId: r.agent.id }
+  const body = FROM_USER + (viaParent ? `For your subagent "${r.agent.name}": ${text}` : text)
+  const res = await $.session
+    .send({ to, text: body })
+    .catch((err: unknown) => ({ isDelivered: false as const, reason: String(err) }))
+  const at = await $.clock.now()
+  const msg = res.isDelivered
+    ? `Sent to ${r.agent.name}: "${clip(text, 40)}"`
+    : `Couldn't reach ${r.agent.name}: ${clip(res.reason ?? '', 60)}`
+  await update($, ui, s => ({ ...s, lastAction: { text: msg, ok: res.isDelivered, at } }))
+  return { msg, ok: res.isDelivered }
+}
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
@@ -725,7 +777,7 @@ export const register: Register = on => {
         r => r.agent.name.toLowerCase().includes(want) || (r.tree?.branch ?? '').toLowerCase().includes(want),
       )
       if (!row || !want) return { text: `No agent matches "${arg}".` }
-      await update($, ui, u => ({ ...u, selected: row.key, composing: false }))
+      await update($, ui, u => ({ ...u, selected: row.key }))
       await $.ui.open({ id: PANE, title: 'Agent fleet' })
       return { text: `Selected ${row.agent.name}: its buttons are under it in the pane.` }
     }
@@ -741,12 +793,44 @@ export const register: Register = on => {
     return { text: `${summary(v, me)}\n\n(${pane} · screens: ${surfaces.join(', ')})` }
   })
 
+  // "@auth-worker stop after this file" is a message for that agent, not for
+  // this session's model. Anything else, an @file mention included, goes on.
   on('prompt.submit', async ($, e, next) => {
-    if (!e.isMeta && !e.command) {
-      const me = await read($, self)
-      await setSelf($, { prompt: clip(e.text, 120), title: me.title || titleFrom(e.text) })
+    if (e.isMeta || e.command) return next(e)
+    const m = /^@([\w.#-]+)\s+([\s\S]+)$/.exec(e.text.trim())
+    if (m) {
+      const [v, me] = await Promise.all([read($, view), read($, self)])
+      const found = findAgent(gather(v, me).rows, me, m[1] ?? '')
+      if (found.length > 1) {
+        const which = found.slice(0, 4).map(r => `@${r.handle} (#${r.agent.id.slice(0, 4)})`)
+        return { drop: `@${m[1]} could be ${which.join(', ')}: use one of those.` }
+      }
+      if (found[0]) {
+        const { msg, ok } = await sendTo($, me, found[0], (m[2] ?? '').trim())
+        // The engine puts a dropped prompt back in the box: once sent, empty it,
+        // unless the person has started typing something else.
+        if (ok) {
+          $.clock.after(300, async () => {
+            const box = await $.prompt.read().catch(() => undefined)
+            if (box?.text.trim() === e.text.trim()) await $.prompt.fill({ text: '' }).catch(() => undefined)
+          })
+        }
+        return { drop: ok ? `${msg}. Its answer will show under it in the fleet pane.` : msg }
+      }
     }
+    const me = await read($, self)
+    await setSelf($, { prompt: clip(e.text, 120), title: me.title || titleFrom(e.text) })
     return next(e)
+  })
+
+  // A message the person sent from another session's pane: their own
+  // instruction. This session's next reply is the answer every pane shows.
+  on('session.receive', async ($, e, next) => {
+    const at = e.text.indexOf(FROM_USER)
+    if (at < 0) return next(e)
+    const text = e.text.slice(at + FROM_USER.length).trim()
+    await setSelf($, { inbox: { text: clip(text, 120), at: await $.clock.now() }, reply: null })
+    return next({ ...e, text: `${e.text}\n\n${FROM_USER_NOTE}` })
   })
 
   on('turn.start', async ($, e, next) => {
@@ -781,9 +865,17 @@ export const register: Register = on => {
   }).catch(($, e, next) => next(e))
 
   on('turn.complete', async ($, e, next) => {
-    if (e.agentId) await setSub($, e.agentId, { status: 'idle', activity: 'turn finished' })
-    else await setSelf($, { status: 'idle', activity: 'waiting for you' })
-    return next(e)
+    const result = await next(e)
+    if (e.agentId) {
+      await setSub($, e.agentId, { status: 'idle', activity: 'turn finished' })
+      return result
+    }
+    // The first answer after a message from the fleet is its reply.
+    const me = await read($, self)
+    const isReply = !!me.inbox && (!me.reply || me.reply.at < me.inbox.at) && !!result.text.trim()
+    const reply = isReply ? { reply: { text: clip(result.text, 160), at: await $.clock.now() } } : {}
+    await setSelf($, { status: 'idle', activity: 'waiting for you', ...reply })
+    return result
   })
 
   on('session.end', async ($, e, next) => {
@@ -811,35 +903,22 @@ async function drawFleet(
   e: RenderInput<'Pane' | 'CommandOutput'>,
   width?: number,
 ) {
-  const els = $.ui.resolve(e)
-  const { Box, Text, Button } = els
-  const Input = 'Input' in els ? els.Input : undefined
+  const { Box, Text, Button } = $.ui.resolve(e)
   const [v, me, u] = await Promise.all([read($, view), read($, self), read($, ui)])
   const tick = Math.floor(v.checkedAt / BEAT_MS)
-  const { now, beats, rows, treesOf, treeFor, repos, count, needsYou, where, label } = gather(v, me)
+  const { now, beats, rows, treesOf, repos, count, needsYou, where } = gather(v, me)
 
   const setUi = (fn: (s: FleetUi) => FleetUi) => void update($, ui, fn)
-  const select = (r: Row) =>
-    setUi(s => ({ ...s, selected: s.selected === r.key ? '' : r.key, composing: false }))
+  const select = (r: Row) => setUi(s => ({ ...s, selected: s.selected === r.key ? '' : r.key }))
 
-  // A session takes the message itself; a subagent through its own session.
-  const send = async (r: Row, text: string, what: string) => {
-    const viaParent = r.isSub && r.parent?.sessionId !== me.sessionId
-    const to = !r.isSub
-      ? { sessionId: r.agent.id }
-      : viaParent
-        ? { sessionId: r.parent?.sessionId ?? '' }
-        : { agentId: r.agent.id }
-    const body = viaParent ? `For your subagent "${r.agent.name}": ${text}` : text
-    const res = await $.session
-      .send({ to, text: body })
-      .catch((err: unknown) => ({ isDelivered: false as const, reason: String(err) }))
-    const at = await $.clock.now()
-    const msg = res.isDelivered
-      ? `Sent "${what}" to ${r.agent.name}`
-      : `Couldn't reach ${r.agent.name}: ${clip(res.reason ?? '', 60)}`
-    await update($, ui, s => ({ ...s, composing: false, lastAction: { text: msg, ok: res.isDelivered, at } }))
-    $.ui.toast(msg)
+  // Message puts "@handle " in the prompt; the person finishes it there.
+  const message = async (r: Row) => {
+    const filled = await $.prompt.fill({ text: `@${r.handle} ` }).catch(() => undefined)
+    $.ui.toast(
+      filled?.isFilled
+        ? `Type your message to ${r.agent.name} and press Enter`
+        : `Type @${r.handle} and your message in the prompt`,
+    )
   }
 
   // The same news again (a subagent that keeps asking) is one line with a count.
@@ -875,49 +954,24 @@ async function drawFleet(
       return <Text dimColor>{'  '}This is you: pick another agent to message it.</Text>
     }
     const last = u.lastAction && now - u.lastAction.at < 60_000 ? u.lastAction : null
+    const stop = () => void sendTo($, me, r, STOP_TEXT).then(({ msg }) => $.ui.toast(msg))
     return (
       <Box flexDirection="column" paddingLeft={2} marginTop={1}>
         <Box flexDirection="row" flexWrap="wrap">
-          {Input ? (
-            <Box marginRight={1}>
-              <Button
-                key="act:msg"
-                hotkey="m"
-                variant="primary"
-                onPress={() => setUi(s => ({ ...s, composing: !s.composing }))}
-              >
-                Message… (m)
-              </Button>
-            </Box>
-          ) : null}
-          {PRESETS.map(p => (
-            <Box marginRight={1}>
-              <Button key={`act:${p.key}`} hotkey={p.key} onPress={() => void send(r, p.text, p.label)}>
-                {`${p.label} (${p.key})`}
-              </Button>
-            </Box>
-          ))}
-          <Button
-            key="act:close"
-            hotkey="x"
-            dimColor
-            onPress={() => setUi(s => ({ ...s, selected: '', composing: false }))}
-          >
+          <Box marginRight={1}>
+            <Button key="act:msg" hotkey="m" variant="primary" onPress={() => void message(r)}>
+              Message (m)
+            </Button>
+          </Box>
+          <Box marginRight={1}>
+            <Button key="act:stop" hotkey="s" onPress={stop}>
+              Stop (s)
+            </Button>
+          </Box>
+          <Button key="act:close" hotkey="x" dimColor onPress={() => setUi(s => ({ ...s, selected: '' }))}>
             Close (x)
           </Button>
         </Box>
-        {Input && u.composing ? (
-          <Input
-            key="act:text"
-            label="Message: "
-            placeholder={`to ${r.agent.name}`}
-            submitLabel="send"
-            autoFocus
-            onSubmit={t => {
-              if (t.trim()) void send(r, t.trim(), clip(t.trim(), 30))
-            }}
-          />
-        ) : null}
         {last ? (
           <Text color={last.ok ? 'success' : 'error'} wrap="truncate-end">
             {last.ok ? '✓ ' : '✗ '}
@@ -928,13 +982,32 @@ async function drawFleet(
     )
   }
 
+  // The person's last message to a session from the fleet, and its answer.
+  const conversation = (b: FleetBeat) => {
+    if (!b.inbox || now - b.inbox.at > 30 * 60_000) return null
+    const answer = b.reply && b.reply.at >= b.inbox.at ? b.reply : null
+    return (
+      <Box flexDirection="column" paddingLeft={2}>
+        <Text dimColor wrap="truncate-end">
+          → you: {b.inbox.text} · {ago(now - b.inbox.at)}
+        </Text>
+        {answer ? (
+          <Text color="success" wrap="wrap">
+            ↩ {answer.text} <Text dimColor>· {ago(now - answer.at)}</Text>
+          </Text>
+        ) : (
+          <Text dimColor italic>
+            {'  '}waiting for its answer…
+          </Text>
+        )}
+      </Box>
+    )
+  }
+
   const agentRow = (r: Row, i: number) => {
     const s = STATUS[r.agent.status]
     const isSelected = r.key === u.selected
-    const from =
-      r.parent && treeFor(r.parent.repoRoot, r.parent.cwd)?.path !== r.tree?.path
-        ? `  ← ${clip(label(r.parent), 18)}`
-        : ''
+    const isMe = !r.isSub && r.agent.id === me.sessionId
     const head = (
       <Box flexDirection="row" justifyContent="space-between">
         <Box flexDirection="row" flexShrink={1}>
@@ -948,16 +1021,24 @@ async function drawFleet(
               {' '}
               {said(r, now)}
             </Text>
-          ) : (
-            <Text dimColor italic wrap="truncate-end">
-              {from}
+          ) : isMe ? null : (
+            <Text color="suggestion" wrap="truncate-end">
+              {' '}@{r.handle}
             </Text>
           )}
         </Box>
         {statusText(r)}
       </Box>
     )
-    if (u.compact && !isSelected) return <Box flexDirection="column">{head}</Box>
+    const talk = r.beat ? conversation(r.beat) : null
+    if (u.compact && !isSelected) {
+      return (
+        <Box flexDirection="column">
+          {head}
+          {talk}
+        </Box>
+      )
+    }
     return (
       <Box flexDirection="column" marginTop={i === 0 || u.compact ? 0 : 1}>
         {head}
@@ -973,6 +1054,7 @@ async function drawFleet(
             </Text>
           </Box>
         ) : null}
+        {talk}
         {isSelected ? actions(r) : null}
       </Box>
     )
@@ -1153,7 +1235,8 @@ async function drawFleet(
       {e.surface === 'terminal' ? (
         <Box marginTop={1}>
           <Text dimColor wrap="wrap">
-            Click a name for its buttons, ▾ to fold a branch · ctrl+x tab, then a letter
+            Talk to an agent: type @its-name and a message in any prompt. Click a name for
+            buttons, ▾ to fold a branch.
           </Text>
         </Box>
       ) : null}

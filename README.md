@@ -12,8 +12,10 @@ then by git worktree (branch). Open it in any session and you see the same live 
   that need you, agents stuck with no progress for 10 minutes), plus one OS notification at a
   time for the whole machine, not one per session.
 - **Needs you**: agents stopped on a permission prompt, a question or a plan to approve.
-- **Buttons**: click an agent's name for **Message…**, **Status?**, **Ask to stop**,
-  **Commit & push**. The message goes to that session (or to a subagent through its session).
+- **Talk to any agent from your prompt**: `@auth-worker stop after this file` goes to that agent,
+  not to your own Claude. It arrives as your instruction, and its answer shows under it in the pane
+  (`→ you: …` / `↩ …`), in every session's pane, instead of landing in your chat.
+- Click an agent's name for **Message** (puts `@its-name ` in your prompt) and **Stop**.
 - Compact mode, foldable branches, sessions named after what they were started for.
 
 ## Install
@@ -46,9 +48,14 @@ The pane opens by itself in a terminal at least 144 columns wide; otherwise type
 | `/fleet compact` | One line per agent |
 | `/fleet select <agent or branch>` | Selects an agent so its buttons show |
 
-In the pane: click a name for its buttons, ▾ to fold a branch. From the keyboard, `ctrl+x tab`
-gives the pane the focus, then a letter presses a button (`c` compact, `g` dismiss the recap,
-`m` `u` `s` `p` `x` for the selected agent).
+**Talking to agents.** Every agent in the pane shows its handle, like `@auth-worker`. Type
+`@handle your message` in any session's prompt (or from the phone). You can also use a session's id
+(`@#72ba`) or its branch (`@feat-auth`). The pane shows what you sent and the agent's answer under
+it. A prompt whose `@…` is not an agent's handle (an `@file` mention) goes to your Claude as usual.
+
+In the pane: click a name for **Message** and **Stop**, ▾ to fold a branch. From the keyboard,
+`ctrl+x tab` gives the pane the focus, then a letter presses a button (`c` compact, `g` dismiss
+the recap, `m` message, `s` stop, `x` close).
 
 On the phone (Remote Control) the app shows no panes; `/fleet` answers in the chat instead.
 
